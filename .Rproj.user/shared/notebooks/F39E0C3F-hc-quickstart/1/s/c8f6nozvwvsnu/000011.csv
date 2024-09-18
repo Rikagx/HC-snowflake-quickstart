@@ -1,0 +1,1 @@
+"0","barplot(table(heart_failure$sex))"

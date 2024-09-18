@@ -1,0 +1,31 @@
+"0",""
+"0","#| echo: false"
+"0",""
+"0","library(odbc)"
+"0","library(DBI)"
+"2","Warning: package ‘DBI’ was built under R version 4.3.3"
+"0","library(dbplyr)"
+"2","Registered S3 methods overwritten by 'dbplyr':
+  method         from
+  print.tbl_lazy     
+  print.tbl_sql      
+"
+"2","
+Attaching package: ‘dbplyr’
+
+"
+"2","The following objects are masked from ‘package:dplyr’:
+
+    ident, sql
+
+"
+"0","library(tidyverse)"
+"0","library(tidymodels)"
+"0","library(glmnet)"
+"0",""
+"0","# con <- dbConnect("
+"0","#   odbc::snowflake(),"
+"0","#   warehouse = ""DEFAULT_WH"","
+"0","#   database = ""HEALTHCARE"","
+"0","#   schema = ""PUBLIC"""
+"0","# )"

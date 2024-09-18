@@ -1,0 +1,8 @@
+"0","set.seed(537964)"
+"0",""
+"0","hf_split <- initial_split(heart_failure, prop = 0.8)"
+"0","hf_train <- training(hf_split)"
+"0","hf_test <- testing(hf_split)"
+"0",""
+"0","# Create cross validation folds"
+"0","hf_folds <- vfold_cv(hf_train, v = 10)"

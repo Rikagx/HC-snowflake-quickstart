@@ -1,0 +1,102 @@
+library(tidymodels)
+library(glmnet)
+library(tidyverse)
+
+heart_failure <- readr::read_csv("data/heart_failure.csv") 
+
+heart_failure <- heart_failure |>
+  select(age, sex, smoking, anaemia, diabetes, high_blood_pressure, 
+         serum_creatinine, creatinine_phosphokinase, platelets, 
+         ejection_fraction, time, DEATH_EVENT) |>
+  rename(death = DEATH_EVENT) |>
+  mutate(sex = case_when(sex == 0 ~ "F",
+                         sex == 1 ~ "M")) |>
+  mutate_at(c("death", "smoking", "anaemia", "diabetes", "high_blood_pressure"), as.factor)
+
+
+# Inspect variables -------------------------------------------------------
+
+barplot(table(heart_failure$death))
+barplot(table(heart_failure$sex))
+hist(heart_failure$age)
+
+# Split into training and testing -----------------------------------------
+
+set.seed(20231018)
+hf_split <- initial_split(heart_failure)
+hf_train <- training(hf_split)
+hf_test <- testing(hf_split)
+
+# choose a different split proportion?
+set.seed(20231018)
+hf_split <- initial_split(heart_failure, prop = 0.8)
+hf_train <- training(hf_split)
+hf_test <- testing(hf_split)
+
+# Create cross validation folds
+hf_folds <- vfold_cv(hf_train, v = 10)
+
+
+# Build a recipe ----------------------------------------------------------
+
+hf_recipe <- recipe(death ~ ., data = hf_train) |>
+  step_dummy(all_nominal_predictors()) |>  # Convert all categorical variables to dummies
+  step_normalize(age, serum_creatinine, creatinine_phosphokinase, 
+                 platelets, ejection_fraction, time) 
+
+wf <- workflow() |> 
+  add_recipe(hf_recipe)
+
+# Specify the model -------------------------------------------------------
+
+tune_spec_lasso <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet")
+
+# Tune the model ----------------------------------------------------------
+
+# Specify the model with ROC AUC as a metric
+roc_auc_metric <- metric_set(roc_auc)  # Add roc_auc to the metrics
+
+# Fit lots of values
+lasso_grid <- tune_grid(
+  wf |> add_model(tune_spec_lasso),
+  resamples = hf_folds,
+  grid = grid_regular(penalty(), levels = 50),
+  metrics = roc_auc_metric
+)
+
+# Choose the best value
+highest_roc_auc_lasso <- select_best(lasso_grid, metric = "roc_auc")
+
+highest_roc_auc_lasso
+
+# Fit the final model -----------------------------------------------------
+
+final_lasso <- finalize_workflow(
+  add_model(wf, tune_spec_lasso),
+  highest_roc_auc_lasso
+)
+
+
+# Model evaluation --------------------------------------------------------
+
+last_fit(final_lasso, hf_split) |>
+  collect_metrics()
+
+# which variables were most important?
+final_lasso |>
+  fit(hf_train) |>
+  extract_fit_parsnip() |>
+  vip::vi(lambda = highest_roc_auc_lasso$penalty) |>
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) |>
+  ggplot(mapping = aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col()
+
+# Fit the final model on the entire training data
+final_fit_lasso <- fit(final_lasso, data = hf_train)
+
+predictions_lasso <- predict(final_fit_lasso, hf_test, type = "prob")
+predictions_lasso

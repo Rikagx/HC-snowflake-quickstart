@@ -1,0 +1,192 @@
+---
+title: "Healthcare Snowflake Quickstart"
+format: html
+editor: visual
+---
+
+## Data
+
+We will be using the Heart Failure Clinical Records dataset which is available for download [here](https://archive.ics.uci.edu/dataset/519/heart+failure+clinical+records), in the data folder of this repo, as well as in this S3 [bucket](s3://heart-failure-records/heart_failure.csv).
+
+This quickstart exercise will use machine learning techniques to identify which variables are most predictive of survival of patients with heart failure. It will also create a prediction model for a LASSO logistic regression.
+
+| **Variable Name**        | **Role** | **Type**   | **Demographic** | **Description**                                           | **Units**        | **Missing Values** |
+|---------|---------|---------|---------------|-------------|---------|---------|
+| age                      | Feature  | Integer    | Age             | age of the patient                                        | years            | no                 |
+| anaemia                  | Feature  | Binary     |                 | decrease of red blood cells or hemoglobin                 |                  | no                 |
+| creatinine_phosphokinase | Feature  | Integer    |                 | level of the CPK enzyme in the blood                      | mcg/L            | no                 |
+| diabetes                 | Feature  | Binary     |                 | if the patient has diabetes                               |                  | no                 |
+| ejection_fraction        | Feature  | Integer    |                 | percentage of blood leaving the heart at each contraction | \%               | no                 |
+| high_blood_pressure      | Feature  | Binary     |                 | if the patient has hypertension                           |                  | no                 |
+| platelets                | Feature  | Continuous |                 | platelets in the blood                                    | kiloplatelets/mL | no                 |
+| serum_creatinine         | Feature  | Continuous |                 | level of serum creatinine in the blood                    | mg/dL            | no                 |
+| serum_sodium             | Feature  | Integer    |                 | level of serum sodium in the blood                        | mEq/L            | no                 |
+| sex                      | Feature  | Binary     | Sex             | woman or man                                              |                  | no                 |
+| smoking                  | Feature  | Binary     |                 | if the patient smokes or not                              |                  | no                 |
+| time                     | Feature  | Integer    |                 | follow-up period                                          | days             | no                 |
+| death_event              | Target   | Binary     |                 | if the patient died during the follow-up period           |                  | no                 |
+
+## Access Data from S3
+
+```         
+use role sysadmin;
+
+use database healthcare;
+use schema public;
+use warehouse default_wh;
+
+create or replace stage heart_data
+url="s3://heart-failure-records/heart_failure.csv"
+directory = (enable = TRUE);
+```
+
+Verify if the data are accessible in your external stage by entering the following command on your Snowflake worksheet.
+
+```         
+ls @heart_data
+```
+
+## Connect to data
+
+```{r setup}
+
+#| echo: false
+
+library(odbc)
+library(DBI)
+library(dbplyr)
+library(tidyverse)
+library(tidymodels)
+library(glmnet)
+
+# con <- dbConnect(
+#   odbc::snowflake(),
+#   warehouse = "DEFAULT_WH",
+#   database = "HEALTHCARE",
+#   schema = "PUBLIC"
+# )
+```
+
+## Clean and inspect data
+
+```{r}
+heart_failure <- readr::read_csv("data/heart_failure.csv") 
+
+# heart_failure <- con |> tbl("HEART_DATA")
+
+heart_failure <- heart_failure |>
+  select(age, sex, smoking, anaemia, diabetes, high_blood_pressure, 
+         serum_creatinine, creatinine_phosphokinase, platelets, 
+         ejection_fraction, time, DEATH_EVENT) |>
+  rename(death = DEATH_EVENT) |>
+  mutate(sex = case_when(sex == 0 ~ "F",
+                         sex == 1 ~ "M")) |>
+  mutate_at(c("death", "smoking", "anaemia", "diabetes", "high_blood_pressure"), as.factor)
+
+# Inspect variables -------------------------------------------------------
+
+barplot(table(heart_failure$death))
+barplot(table(heart_failure$sex))
+hist(heart_failure$age)
+```
+
+## Split data and cross-validate
+
+```{r}
+set.seed(537964)
+
+hf_split <- initial_split(heart_failure, prop = 0.8)
+hf_train <- training(hf_split)
+hf_test <- testing(hf_split)
+
+# Create cross validation folds
+hf_folds <- vfold_cv(hf_train, v = 10)
+```
+
+We are splitting the data into 60 observations for the test set and 239 observations for the training set.
+
+## Build a recipe
+
+```{r}
+hf_recipe <- recipe(death ~ ., data = hf_train) |>
+  step_dummy(all_nominal_predictors()) |>  # Convert all categorical variables to dummies
+  step_normalize(age, serum_creatinine, creatinine_phosphokinase, 
+                 platelets, ejection_fraction, time) 
+
+wf <- workflow() |> 
+  add_recipe(hf_recipe)
+```
+
+We are adding a recipe to the workflow from the `tidymodels` package which defines a set of pre-processing steps for the data including normalization and dummy variable creation.
+
+## Modeling and Tuning
+
+```{r}
+tune_spec_lasso <- logistic_reg(penalty = tune(), mixture = 1) |>
+  set_engine("glmnet")
+
+# Tune the model ----------------------------------------------------------
+
+# Specify the model with ROC AUC as a metric
+roc_auc_metric <- metric_set(roc_auc)  # Add roc_auc to the metrics
+
+# Fit lots of values
+lasso_grid <- tune_grid(
+  wf |> add_model(tune_spec_lasso),
+  resamples = hf_folds,
+  grid = grid_regular(penalty(), levels = 50),
+  metrics = roc_auc_metric
+)
+
+# Choose the best value
+highest_roc_auc_lasso <- select_best(lasso_grid, metric = "roc_auc")
+
+```
+
+For our model we are using a LASSO logistic regression because it it performs **automatic feature selection** by shrinking the coefficients of less important features to zero. This means that only the most important features are retained in the final model, which can improve model interpretability and reduce overfitting. In our case, with 13 clinical features in the heart failure dataset, LASSO can help identify the most significant predictors of patient survival or death.
+
+By penalizing large coefficients, LASSO helps prevent overfitting, especially when the dataset is small (as is our case with 299 samples). It discourages the model from fitting to noise in the data, which can happen with a standard logistic regression if there are many features relative to the number of samples.
+
+## Model Fit and Evaluation
+
+```{r}
+
+final_lasso <- finalize_workflow(
+  add_model(wf, tune_spec_lasso),
+  highest_roc_auc_lasso
+)
+
+
+# Model evaluation --------------------------------------------------------
+
+last_fit(final_lasso, hf_split) |>
+  collect_metrics()
+
+# which variables were most important?
+final_lasso |>
+  fit(hf_train) |>
+  extract_fit_parsnip() |>
+  vip::vi(lambda = highest_roc_auc_lasso$penalty) |>
+  mutate(
+    Importance = abs(Importance),
+    Variable = fct_reorder(Variable, Importance)
+  ) |>
+  ggplot(mapping = aes(x = Importance, y = Variable, fill = Sign)) +
+  geom_col()
+
+```
+
+Time, serum_creatine, ejection_fraction, and age seem to have the best predictive values for survival.
+
+## Prediction on training data
+
+```{r}
+final_fit_lasso <- fit(final_lasso, data = hf_train)
+
+predictions_lasso <- predict(final_fit_lasso, hf_test, type = "prob")
+predictions_lasso
+```
+
+-   **`.pred_0`**: This column shows the predicted probability that the observation belongs to class **0** - this would be the probability of the patient **surviving** or not experiencing a death event during the follow-up period
+
+-   **`.pred_1`**: This column shows the predicted probability that the observation belongs to class **1** - this would be the probability of the patient **dying** during the follow-up period
