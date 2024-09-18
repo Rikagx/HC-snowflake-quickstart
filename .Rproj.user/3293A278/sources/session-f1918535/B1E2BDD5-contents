@@ -6,12 +6,12 @@ editor: visual
 
 ## Data
 
-We will be using the Heart Failure Clinical Records dataset which is available for download [here](https://archive.ics.uci.edu/dataset/519/heart+failure+clinical+records), in the data folder of this repo, as well as in this S3 [bucket](s3://heart-failure-records/heart_failure.csv).
+We will be using the Heart Failure Clinical Records dataset which is available for download [here](https://archive.ics.uci.edu/dataset/519/heart+failure+clinical+records), in the data folder of this [repo](https://github.com/Rikagx/HC-snowflake-quickstart/tree/main/data), as well as in this S3 [bucket](s3://heart-failure-records/heart_failure.csv).
 
 This quickstart exercise will use machine learning techniques to identify which variables are most predictive of survival of patients with heart failure. It will also create a prediction model for a LASSO logistic regression.
 
 | **Variable Name**        | **Role** | **Type**   | **Demographic** | **Description**                                           | **Units**        | **Missing Values** |
-|---------|---------|---------|---------------|-------------|---------|---------|
+|-----------|-----------|-----------|-----------|-----------|-----------|-----------|
 | age                      | Feature  | Integer    | Age             | age of the patient                                        | years            | no                 |
 | anaemia                  | Feature  | Binary     |                 | decrease of red blood cells or hemoglobin                 |                  | no                 |
 | creatinine_phosphokinase | Feature  | Integer    |                 | level of the CPK enzyme in the blood                      | mcg/L            | no                 |
@@ -58,33 +58,44 @@ library(dbplyr)
 library(tidyverse)
 library(tidymodels)
 library(glmnet)
+library(janitor)
+library(orbital)
 
-# con <- dbConnect(
-#   odbc::snowflake(),
-#   warehouse = "DEFAULT_WH",
-#   database = "HEALTHCARE",
-#   schema = "PUBLIC"
-# )
+con <- dbConnect(
+  odbc::snowflake(),
+  warehouse = "DEFAULT_WH",
+  database = "HEALTHCARE",
+  schema = "PUBLIC"
+)
 ```
 
-## Clean and inspect data
+## Pull data into memory
 
 ```{r}
-heart_failure <- readr::read_csv("data/heart_failure.csv") 
+# heart_failure <- readr::read_csv("data/heart_failure.csv") 
 
-# heart_failure <- con |> tbl("HEART_DATA")
+heart_failure <- con |> tbl("HEART_DATA")
 
-heart_failure <- heart_failure |>
-  select(age, sex, smoking, anaemia, diabetes, high_blood_pressure, 
-         serum_creatinine, creatinine_phosphokinase, platelets, 
-         ejection_fraction, time, DEATH_EVENT) |>
-  rename(death = DEATH_EVENT) |>
-  mutate(sex = case_when(sex == 0 ~ "F",
-                         sex == 1 ~ "M")) |>
-  mutate_at(c("death", "smoking", "anaemia", "diabetes", "high_blood_pressure"), as.factor)
+heart_failure <- heart_failure |> 
+  select(AGE, SEX, SMOKING, ANAEMIA, DIABETES, HIGH_BLOOD_PRESSURE, 
+         SERUM_CREATININE, CREATININE_PHOSPHOKINASE, PLATELETS, 
+         EJECTION_FRACTION, TIME, DEATH_EVENT) |> collect()
 
-# Inspect variables -------------------------------------------------------
+```
 
+## Data transformation
+
+```{r}
+heart_failure <- heart_failure |> rename(DEATH = DEATH_EVENT) |>
+  mutate(SEX = case_when(SEX == 0 ~ "F",
+                         SEX == 1 ~ "M")) |> 
+  mutate_at(c("DEATH", "SMOKING", "ANAEMIA", "DIABETES", "HIGH_BLOOD_PRESSURE"), as.factor) |> 
+  clean_names()
+```
+
+## Inspect variables
+
+```{r}
 barplot(table(heart_failure$death))
 barplot(table(heart_failure$sex))
 hist(heart_failure$age)
@@ -128,7 +139,7 @@ tune_spec_lasso <- logistic_reg(penalty = tune(), mixture = 1) |>
 # Tune the model ----------------------------------------------------------
 
 # Specify the model with ROC AUC as a metric
-roc_auc_metric <- metric_set(roc_auc)  # Add roc_auc to the metrics
+roc_auc_metric <- metric_set(roc_auc)  # Add roc auc to the metrics
 
 # Fit lots of values
 lasso_grid <- tune_grid(
